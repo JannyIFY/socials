@@ -2,6 +2,9 @@
 (define-constant ERR-NOT-AUTHORIZED (err u1))
 (define-constant ERR-POST-NOT-FOUND (err u2))
 (define-constant ERR-INSUFFICIENT-FUNDS (err u3))
+(define-constant ERR-INVALID-POST (err u4))
+(define-constant ERR-INVALID-AMOUNT (err u5))
+(define-constant ERR-SELF-ACTION (err u6))
 
 ;; Define data variables
 (define-data-var platform-owner principal tx-sender)
@@ -29,6 +32,18 @@
 
 (define-map Followers { follower: principal, following: principal } bool)
 
+;; Helper functions for validation
+(define-private (is-valid-post-id (post-id uint))
+  (and 
+    (>= post-id u1)
+    (<= post-id (var-get post-counter))
+  )
+)
+
+(define-private (is-valid-amount (amount uint))
+  (> amount u0)
+)
+
 ;; Create a new post
 (define-public (create-post (content-hash (string-ascii 64)))
   (let
@@ -39,6 +54,9 @@
         (map-get? UserProfiles tx-sender)
       ))
     )
+    ;; Validate content hash is not empty
+    (asserts! (> (len content-hash) u0) ERR-INVALID-POST)
+    
     (map-set Posts post-id
       {
         author: tx-sender,
@@ -66,24 +84,39 @@
     (
       (post (unwrap! (map-get? Posts post-id) ERR-POST-NOT-FOUND))
       (author (get author post))
-      (author-profile (default-to 
-        { username: "", reputation-score: u0, total-posts: u0, total-earnings: u0 }
-        (map-get? UserProfiles author)
-      ))
     )
-    (try! (stx-transfer? amount tx-sender author))
-    (map-set Posts post-id
-      (merge post { tips-received: (+ (get tips-received post) amount) })
-    )
-    (map-set UserProfiles author
-      (merge author-profile
-        {
-          reputation-score: (+ (get reputation-score author-profile) u1),
-          total-earnings: (+ (get total-earnings author-profile) amount)
-        }
+    ;; Validate inputs
+    (asserts! (is-valid-post-id post-id) ERR-INVALID-POST)
+    (asserts! (is-valid-amount amount) ERR-INVALID-AMOUNT)
+    (asserts! (not (is-eq tx-sender author)) ERR-SELF-ACTION)
+    
+    (let
+      (
+        (author-profile (unwrap! (map-get? UserProfiles author) ERR-NOT-AUTHORIZED))
+        (updated-tips (+ (get tips-received post) amount))
+        (updated-earnings (+ (get total-earnings author-profile) amount))
+        (updated-reputation (+ (get reputation-score author-profile) u1))
       )
+      
+      ;; Perform STX transfer first
+      (try! (stx-transfer? amount tx-sender author))
+      
+      ;; Update post data
+      (map-set Posts post-id
+        (merge post { tips-received: updated-tips })
+      )
+      
+      ;; Update author profile
+      (map-set UserProfiles author
+        (merge author-profile
+          {
+            reputation-score: updated-reputation,
+            total-earnings: updated-earnings
+          }
+        )
+      )
+      (ok true)
     )
-    (ok true)
   )
 )
 
@@ -93,29 +126,39 @@
     (
       (post (unwrap! (map-get? Posts post-id) ERR-POST-NOT-FOUND))
       (author (get author post))
-      (author-profile (default-to 
-        { username: "", reputation-score: u0, total-posts: u0, total-earnings: u0 }
-        (map-get? UserProfiles author)
-      ))
     )
-    (map-set Posts post-id
-      (merge post { likes: (+ (get likes post) u1) })
-    )
-    (map-set UserProfiles author
-      (merge author-profile
-        {
-          reputation-score: (+ (get reputation-score author-profile) u1)
-        }
+    ;; Validate post-id
+    (asserts! (is-valid-post-id post-id) ERR-INVALID-POST)
+    (asserts! (not (is-eq tx-sender author)) ERR-SELF-ACTION)
+    
+    (let
+      (
+        (author-profile (unwrap! (map-get? UserProfiles author) ERR-NOT-AUTHORIZED))
+        (updated-likes (+ (get likes post) u1))
+        (updated-reputation (+ (get reputation-score author-profile) u1))
       )
+      
+      (map-set Posts post-id
+        (merge post { likes: updated-likes })
+      )
+      
+      (map-set UserProfiles author
+        (merge author-profile
+          {
+            reputation-score: updated-reputation
+          }
+        )
+      )
+      (ok true)
     )
-    (ok true)
   )
 )
 
 ;; Follow a user
 (define-public (follow-user (user-to-follow principal))
   (begin
-    (asserts! (not (is-eq tx-sender user-to-follow)) ERR-NOT-AUTHORIZED)
+    (asserts! (not (is-eq tx-sender user-to-follow)) ERR-SELF-ACTION)
+    (asserts! (is-some (map-get? UserProfiles user-to-follow)) ERR-NOT-AUTHORIZED)
     (map-set Followers { follower: tx-sender, following: user-to-follow } true)
     (ok true)
   )
@@ -130,6 +173,9 @@
         (map-get? UserProfiles tx-sender)
       ))
     )
+    ;; Validate username is not empty
+    (asserts! (> (len username) u0) ERR-INVALID-POST)
+    
     (map-set UserProfiles tx-sender
       (merge current-profile { username: username })
     )
